@@ -5,10 +5,10 @@
 # @contact  group@hyperf.io
 # @license  https://github.com/hyperf/hyperf/blob/master/LICENSE
 
-FROM hyperf/hyperf:8.4-ubuntu-v24.04-dev
+FROM hyperf/hyperf:8.4-zts-ubuntu-v24.04-dev
 LABEL maintainer="Hyperf Developers <group@hyperf.io>" version="1.0" license="MIT" app.name="Hyperf"
 
-ENV PHP_HOME=/usr
+ENV PHP_HOME=/usr/local
 ENV PHPX_HOME=/opt/phpx
 ENV PATH="/root/typephp:$PATH"
 ENV LD_LIBRARY_PATH="$PHP_HOME/lib:$PHPX_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -17,7 +17,6 @@ ENV LD_LIBRARY_PATH="$PHP_HOME/lib:$PHPX_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY
 # php8.4-embed 安装后 libphp.so 即位于 $PHP_HOME/lib(= /usr/lib),无需再手动拷贝
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        php8.4-embed \
         cmake \
         libgmp-dev \
         libmpfr-dev \

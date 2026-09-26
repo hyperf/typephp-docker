@@ -2,11 +2,15 @@
 #
 # tpc-compile.sh — 使用 TypePHP(tpc) 将 PHP 源码编译为原生可执行文件。
 #
-# 默认在 Docker 容器内执行编译(与本仓库镜像保持一致):
+# 本脚本属于 typephp-compile SKILL(自包含):编译环境(Dockerfile 等)位于 SKILL 的
+# assets/ 目录 —— 把整个 typephp-compile/ 目录复制到任意项目 .claude/skills/ 下即开箱可用,
+# 不依赖仓库根或项目内任何文件。
+#
+# 默认在 Docker 容器内执行编译:
 #   docker run --rm -v "$PWD":/opt/www -w /opt/www <image> tpc <args...>
 # 若在 Linux 宿主且已安装本机 tpc,并设置 TYPEPHP_USE_LOCAL=1,则直接调用本机 tpc。
 #
-# 用法:
+# 用法(在待编译文件所在目录执行):
 #   ./tpc-compile.sh <file.php> [tpc 参数...]
 #   ./tpc-compile.sh app.php -O3 -j 8
 #   ./tpc-compile.sh hello.php -r -- --flag value
@@ -19,7 +23,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # SKILL 根 = 脚本所在目录的上级
 IMAGE="${TYPEPHP_IMAGE:-typephp:latest}"
 
 usage() {
@@ -39,7 +43,7 @@ usage() {
 EOF
 }
 
-# 0 个参数(可能只传了纯选项如 --dry)仍需参数;这里用 $# 判断是否完全无参
+# 0 个参数仍需参数;这里用 $# 判断是否完全无参
 if [[ $# -eq 0 ]]; then
     usage
     exit 1
@@ -65,8 +69,8 @@ if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
         echo "tpc-compile: 镜像 ${IMAGE} 不存在(已禁用自动构建,见 TYPEPHP_NO_BUILD)" >&2
         exit 1
     fi
-    echo "tpc-compile: 镜像 ${IMAGE} 不存在,正在从仓库根目录构建..." >&2
-    docker build -t "${IMAGE}" "${REPO_ROOT}"
+    echo "tpc-compile: 镜像 ${IMAGE} 不存在,正在用 SKILL assets/ 构建..." >&2
+    docker build -t "${IMAGE}" "${SKILL_DIR}/assets"
 fi
 
 # 将调用者当前目录挂载为容器 /opt/www,保证相对路径与产物位置一致

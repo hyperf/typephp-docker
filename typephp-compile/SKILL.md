@@ -9,45 +9,77 @@ metadata:
 # TypePHP 编译(TypePHP Compile)
 
 本 Skill 用于把 PHP 源码通过 **TypePHP(`tpc`)** AOT 编译器编译为**原生可执行文件**,运行在
-本仓库提供的 Docker 环境内。
+本 Skill 内置的 Docker 环境内。
 
-> 触发与默认行为:**当用户要求"编译 / 构建 / 运行一个 PHP 程序"时,默认使用 `tpc`
-> 将其编译为原生二进制**,除非用户显式指定使用 `php` 解释器(例如 `php -S` 起开发服务器)。
+> **自包含**:本 Skill 是一个**自包含目录单元** —— 编译环境(`assets/`)、辅助脚本(`scripts/`)、
+> 项目脚手架模板(`templates/`)全部内嵌其中。把整个 `typephp-compile/` 复制到任意项目的
+> `.claude/skills/`(或项目内任意目录)即可使用,**不依赖仓库根或任何项目内文件**。
+
+> **触发与默认行为**:当用户要求"编译 / 构建 / 运行一个 PHP 程序"时,默认使用 `tpc`
+> 将其编译为原生二进制,除非用户显式指定使用 `php` 解释器(例如 `php -S` 起开发服务器)。
 
 > **经验维护约定**:TypePHP 编译经验(硬限制、踩坑、已验证方案)**统一持续维护到本文件**——
 > 通用规则沉淀进正文各小节;按里程碑推进的具体项目实例记录见「分阶段编译路线」。
+
+## 目录结构与复制安装
+
+```
+typephp-compile/                  # ← SKILL 根(下文以 <skill>/ 代指)
+├── SKILL.md                      # 本文档
+├── scripts/
+│   ├── tpc-compile.sh            # 单文件 / 简单项目编译
+│   ├── tpc-build.sh              # Hyperf 等框架项目「四步打包」(推荐入口)
+│   └── run-aot.sh                # 运行 AOT 产物(Linux ELF,经 docker)
+├── assets/
+│   ├── Dockerfile                # tpc 编译环境镜像(php 8.4 zts + swoole + tpc)
+│   ├── 99-typephp.ini            # swoole.use_shortname=Off(运行 AOT 产物时挂载)
+│   ├── proxy-exclude.php         # 代理类反推(排除 #[Inject] 同名代理类对应源码)
+│   └── build-aot-config.php      # 生成临时编译配置 aot-project.yml
+├── templates/
+│   ├── project.yml               # 通用编译配置骨架
+│   └── hyperf-aot/main.php       # Hyperf AOT 入口模板(泛化,无项目硬编码)
+└── fixtures/hello.php            # 单文件冒烟验证样例
+```
+
+**复制到新项目**(自包含验证):
+
+```bash
+cp -R <SKILL 源码目录>/typephp-compile <项目>/.claude/skills/typephp-compile
+```
+
+装到 `.claude/skills/` 时,下文所有 `<skill>/` 即
+`<项目>/.claude/skills/typephp-compile/`。
 
 ## 环境
 
 - 基于镜像 `hyperf/hyperf:8.4-zts-ubuntu-v24.04-dev`,内置:
   - **tpc** v0.9.3(对应 PHP 8.4.26),位于容器内 `/root/typephp`,已加入 `PATH`
   - PHPX(PHP 扩展桥接,位于 `/opt/phpx`)
+- 构建源为 `<skill>/assets/`;`scripts/` 脚本在镜像缺失时会自动构建,也可手工构建:
+  ```bash
+  docker build -t typephp:latest <skill>/assets
+  ```
 - 容器工作目录固定为 `/opt/www`,即挂载进来的宿主导出目录。
-- 首次使用需要构建镜像(脚本会自动检测并构建):
-
-```bash
-docker build -t typephp .
-```
 
 ## 快速开始(推荐)
 
-使用仓库内的辅助脚本,它会自动完成「检测镜像 → (缺省时)构建 → docker run 挂载当前目录 → 调用 tpc」:
+脚本会自动完成「检测镜像 → (缺省时)构建 → docker run 挂载当前目录 → 调用 tpc」:
 
 ```bash
-# 编译单个文件(需要全局 main():void 函数)
-./typephp-compile/scripts/tpc-compile.sh hello.php
+# 单文件编译(要求全局 main():void 函数;在文件所在目录执行)
+<skill>/scripts/tpc-compile.sh hello.php
 ```
 
 底层等价于:
 
 ```bash
-docker run --rm -v "$PWD":/opt/www -w /opt/www typephp tpc hello.php
+docker run --rm -v "$PWD":/opt/www -w /opt/www typephp:latest tpc hello.php
 ```
 
 编译产物出现在当前目录(容器内即 `/opt/www`)。运行产物(产物为 Linux ELF):
 
 ```bash
-docker run --rm -v "$PWD":/opt/www -w /opt/www typephp ./hello
+docker run --rm -v "$PWD":/opt/www -w /opt/www typephp:latest ./hello
 ```
 
 ## 编译规则
@@ -80,6 +112,8 @@ docker run --rm -v "$PWD":/opt/www -w /opt/www typephp ./hello
 用 `tpc bin/hyperf.php` **直接编译 Hyperf 3.x 无法一步到位**,但**技术路线是通的**:动态特性
 走 ZendVM fallback 解释、静态热点走 AOT 编译,二者混跑(Webman 的 `tinywan/webman-typephp`
 插件已按同构思路验证)。不要把"编译失败"当成路走不通,按下面的约束改造即可。
+**Hyperf 场景请直接用 `<skill>/scripts/tpc-build.sh`(四步打包,见下方专节);**
+单文件场景用 `<skill>/scripts/tpc-compile.sh`。
 
 ### 已知硬限制(实测 Hyperf 3.2 + tpc v0.9.3)
 
@@ -98,7 +132,8 @@ docker run --rm -v "$PWD":/opt/www -w /opt/www typephp ./hello
    `\Swoole\Coroutine\run(function () { ... $http->start(); })` 包裹服务器生命周期。
 6. **Swoole.use_shortname=Off**:运行含 `go()`/`co()` 短函数的框架(如 Hyperf)时,Swoole
    要求 `swoole.use_shortname=Off`,否则启动报 `Swoole short function names must be disabled`。
-   在容器 php.ini conf.d 追加该配置即可(产物运行时读取系统 php.ini 与 conf.d)。
+   `<skill>/assets/99-typephp.ini` 已写好该配置,`scripts/run-aot.sh` 与 tpc-build 输出的运行命令
+   会自动挂载到容器 php conf.d(产物运行时读取系统 php.ini 与 conf.d)。
 
 改造入口即可绕过:把 `bin/hyperf.php` 的顶层逻辑搬进 `main()`,常量用
 `defined('X') || define('X', ...)` 守护。
@@ -119,7 +154,7 @@ TypePHP 的 `prepare()` 会按"类继承/依赖关系"对源文件做**拓扑排
 |---|---|---|
 | `extends` / `implements` 框架基类(Listener、ExceptionHandler、Processor、Model 等) | ❌ | 需父类/接口也进编译域,会拉入整个框架依赖树,不可持续。改为走 ZendVM fallback |
 | 依赖**注解收集**的类(如枚举 + `#[Message]`/`#[Constants]`) | ✅(配合 scan_cacheable) | 编译能过;注解元数据从预热的 `runtime/container` 缓存装载,不依赖实时扫描。前提:`SCAN_CACHEABLE=true` 运行(见「注解扫描适配」) |
-| 带 `#[Inject]`(属性注解注入)的类,如 Controller 注入 Service | ❌ | 预热阶段会生成**同名代理类**(`runtime/container/proxy/<FQCN 下划线化>.proxy.php`,如 `App_Controller_IndexController.proxy.php`),运行时容器实例化的是代理类(同名替换)。源码文件若进 AOT,会与运行时代理类重声明冲突 Fatal `Cannot redeclare class`。由 tpc-build.sh「代理类反推」自动排除(见下节),无需手工维护 |
+| 带 `#[Inject]`(属性注解注入)的类,如 Controller 注入 Service | ❌ | 预热阶段会生成**同名代理类**(`runtime/container/proxy/<FQCN 下划线化>.proxy.php`,如 `App_Controller_IndexController.proxy.php`),运行时容器实例化的是代理类(同名替换)。源码文件若进 AOT,会与运行时代理类重声明冲突 Fatal `Cannot redeclare class`。由 `scripts/tpc-build.sh`「代理类反推」自动排除(见下节),无需手工维护 |
 | 纯叶子类(不继承框架、无框架注解、无 `#[Inject]`,如控制器基类构造器注入) | ✅ | 可安全 AOT,走原生层加速。注意判定标准是「不含 `#[Inject]`」——带 `#[Inject]` 的一律归上一行 |
 
 > 经验:Hyperf/类似框架按「**入口 + 纯业务热点 AOT,框架绑定业务走 ZendVM fallback**」
@@ -142,13 +177,14 @@ tpc 若把原类注册为内置类,运行时代理类重声明同名类直接 `F
    → `app/Controller/IndexController.php`;
 3. 把这份文件列表注入 tpc 配置的 `ignore` 块,重新生成临时配置供 `tpc` 使用。
 
-**载体**(`typephp-docker/` 三个文件,项目内自包含,源仓库 hyperf/repos/typephp-docker 同名):
-- `proxy-exclude.php` —— 反推实现,stdout 每行输出一个相对路径;
-- `build-aot-config.php` —— 读 `project.yml`,把反推结果注入 `ignore`(原配置无 `ignore:` 则追加),
+**载体**(全部内嵌在 SKILL,自包含):
+- `assets/proxy-exclude.php` —— 反推实现,stdout 每行输出一个相对路径;
+- `assets/build-aot-config.php` —— 读 `project.yml`,把反推结果注入 `ignore`(原配置无 `ignore:` 则追加),
   输出 `aot-project.yml`(写在项目根,原因见「问题排查」`getAbsolutePath`);
-- `tpc-build.sh` —— 固化四步:①预热缓存(清空 `runtime/container` + php 解释器 +
-  `SCAN_CACHEABLE=true`,产出缓存与代理类)→ ②反推排除 → ③`tpc aot-project.yml <args>` →
-  ④确认产物。**注意**③之后每次编译都基于**重新预热后的新代理状态**,新增一个带 `#[Inject]`
+- `scripts/tpc-build.sh` —— 固化四步:①预热缓存(清空 `runtime/container` + php 解释器 +
+  `SCAN_CACHEABLE=true`,产出缓存与代理类)→ ②反推排除(**在 docker 容器内执行**,
+  不依赖宿主 php,资产装配到容器 `/opt/skill`)→ ③`tpc aot-project.yml <args>` → ④确认产物。
+  **注意**③之后每次编译都基于**重新预热后的新代理状态**,新增一个带 `#[Inject]`
   的类无需手工改任何清单。
 
 **验证信号**:tpc 日志 `prepare completed: N source files` 的 N **不含**代理类对应文件
@@ -166,7 +202,7 @@ AOT 类对扫描器表现为"无源码类"(`getFileName()===false`)——**不�
   - **预热**(php 解释器):`docker run -e SCAN_CACHEABLE=true ... sh -c 'rm -rf runtime/container && php bin/hyperf.php'`
     → 缓存缺失时实时扫描并写入新缓存;
   - **运行**(AOT 产物):直接 `loadCache`,跳过 class traversal,无 TypeError。
-打包链路已固化在 `typephp-docker/tpc-build.sh`(检测镜像 → 预热缓存+生成代理类 → **代理类反推
+打包链路已固化在 `<skill>/scripts/tpc-build.sh`(检测镜像 → 预热缓存+生成代理类 → **代理类反推
 自动排除**(见上一节)→ `tpc aot-project.yml` → 输出运行命令),
 全程 docker 内进行、只靠环境变量,不触碰 config / app / vendor;`sources` 用目录级
 (如 `app/Controller/`),带 `#[Inject]` 的类由反推步骤自动排除。
@@ -185,10 +221,54 @@ AOT 类对扫描器表现为"无源码类"(`getFileName()===false`)——**不�
   强类型(`strict_types=1`)恒为 on。完整清单见 TypePHP 源码
   `docs/zh-cn/INCOMPATIBLE_PHP_FEATURES.md`。
 
+### tpc-build.sh 用法(框架项目推荐入口)
+
+在项目根执行:
+
+```bash
+<skill>/scripts/tpc-build.sh            # 等价 tpc aot-project.yml -O0
+<skill>/scripts/tpc-build.sh -O2 -j 8   # 透传 tpc 参数
+```
+
+四步流程:
+1. **预热注解缓存**:清空 `runtime/container` → docker 内 php 解释器跑 `bin/hyperf.php`(注入
+   `SCAN_CACHEABLE=true`),产出 `runtime/container/*.cache` 与同名代理类;
+2. **代理类反推**:容器内解析 `runtime/container/proxy/*.proxy.php` → 反推「不可进 AOT」的
+   源码文件,注入临时配置 `ignore`,生成项目根 `aot-project.yml`;
+3. **编译**:`tpc aot-project.yml <透传参数>`;
+4. **确认产物** + 输出运行指引。
+
+环境变量:
+
+| 变量 | 作用 | 默认 |
+|---|---|---|
+| `TYPEPHP_IMAGE` | 镜像名 | `typephp:latest` |
+| `TYPEPHP_NO_BUILD` | `1` 时镜像缺失直接失败,不自动构建 | 空 |
+| `AOT_OUTPUT` | 产物文件名(仍会 `-`→`_`) | 取 `project.yml` 的 `name` |
+| `TPC_PROJECT_ROOT` | 项目根(替代调用时所在目录) | `$PWD` |
+| `TPC_BOOT` | 预热启动命令 | `php bin/hyperf.php` |
+| `TYPEPHP_USE_LOCAL` | `1` 时优先本机 tpc(仅 Linux 宿主有效,产物为 ELF) | 空 |
+
+运行产物:推荐 `<skill>/scripts/run-aot.sh` —— 自动挂载 `assets/99-typephp.ini` 到容器
+conf.d、注入 `SCAN_CACHEABLE=true`、映射端口(见该脚本头注释的 `AOT_PORT` /
+`AOT_OUTPUT` / `TYPEPHP_IMAGE`)。
+
+### 模板自动生成说明(首次运行开箱即用)
+
+首次在项目根运行 `scripts/tpc-build.sh` 时,自动完成项目脚手架:
+- 缺 `project.yml` → 从 `<skill>/templates/project.yml` 复制(默认 `sources` 仅
+  `hyperf-aot/`,示例业务源已注释),并提示检查 `name` / `sources`;
+- 缺 `hyperf-aot/main.php` → 从 `<skill>/templates/hyperf-aot/main.php` 复制
+  (泛化 Hyperf 入口,无项目硬编码);
+- 缺 `bin/hyperf.php` / `vendor/autoload.php` / `config/container.php` → 报错退出,
+  判定为不可打包的 Hyperf 项目。
+
+生成后这两个文件即归项目所有,可按需修改;已有文件不会被覆盖。
+
 ### 分阶段编译路线(每步有明确验证信号,避免一次投入撞硬墙)
 > 进度来源:`hyperf/biz-skeleton`(Hyperf 3.2)实测,2026-09-26。
 > 注解扫描适配方案纠正:由「patch vendor」改为「**不改源码/vendor,docker 内 env `SCAN_CACHEABLE=true`
-> + 预热缓存」**,打包链路固化于 `typephp-docker/tpc-build.sh`(M5 产物化已完成)。
+> + 预热缓存」,打包链路固化于 SKILL `scripts/tpc-build.sh`(M5 产物化 + M6 反推自动化已完成)。
 
 1. **M1 单文件环路 ✅**:写含 `main(): void` 的 hello 编译并在 docker 内运行 → 验证镜像/挂载/产物链条。
 2. **M2 最小 Swoole HTTP 服务器 ✅**(风险解除):
@@ -204,18 +284,21 @@ AOT 类对扫描器表现为"无源码类"(`getFileName()===false`)——**不�
    - `project.yml` 按「AOT 边界判定表」只放 `hyperf-aot` + 纯业务单元(如控制器),其余 app 走 fallback。
    - 注解扫描按「注解扫描适配」处理:**不改源码/vendor**,docker 内 env `SCAN_CACHEABLE=true` + 预热缓存。
 4. **M4 完整 smoke test(待做)**:产物收束便携目录(见下),docker 内连 MySQL/Redis、命中 controller。
-5. **M5 产物化 ✅**:`typephp-docker/tpc-build.sh` 固化「预热缓存(env `SCAN_CACHEABLE=true`)
+5. **M5 产物化 ✅**:SKILL `scripts/tpc-build.sh` 固化「预热缓存(env `SCAN_CACHEABLE=true`)
    → `tpc project.yml` → 运行命令」,支持 `TYPEPHP_IMAGE` / `TYPEPHP_NO_BUILD` / `AOT_OUTPUT`;
    不改源码、不 patch vendor。
 6. **M6 代理类反推自动化 ✅**(承接 M5,补齐 `#[Inject]` 场景):
    - 前置:预热会为带 `#[Inject]` 的类生成**同名代理类**到 `runtime/container/proxy/`,
      这些源码文件运行时被代理类替换,进 AOT 会 `Cannot redeclare class`(见「业务代码静态
      编译边界」判定表);
-   - 实现:`typephp-docker/{proxy-exclude,build-aot-config}.php` +
-     `tpc-build.sh` 新增「2/4 代理类反推」步骤,自动把反推结果注入 `ignore` 生成 `aot-project.yml`,
+   - 实现:SKILL `assets/{proxy-exclude,build-aot-config}.php` + `scripts/tpc-build.sh`
+     新增「2/4 代理类反推」步骤,自动把反推结果注入 `ignore` 生成 `aot-project.yml`,
      `sources` 用**目录级**(`app/Controller/`),无需手工维护类清单;
    - 验证:`prepare completed: N source files` 不含代理类;产物 curl 命中接口且返回**注入
      服务的值**证明 DI 链路完整(php-demo 实测 `{"code":0,...,"message":"Hello foo"}`)。
+7. **M7 自包含化 ✅**(本版):SKILL 收敛为自包含目录单元——编译环境、辅助脚本、项目模板全部
+   内嵌 `<skill>/`,整体 `cp -R` 到任意项目即用,不再依赖项目内 `typephp-docker/` 等散落文件;
+   反推等 php 工具改容器内执行,不依赖宿主 php。
 
 ### 产物形态与部署
 
@@ -249,29 +332,30 @@ AOT 类对扫描器表现为"无源码类"(`getFileName()===false`)——**不�
 
 ```bash
 # 编译全部参数透传:tpc file.php -O3 -j 8
-./typephp-compile/scripts/tpc-compile.sh hello.php -O3 -j 8
+<skill>/scripts/tpc-compile.sh hello.php -O3 -j 8
 
 # 编译并运行,向程序传参
-./typephp-compile/scripts/tpc-compile.sh hello.php -r -- --flag value
+<skill>/scripts/tpc-compile.sh hello.php -r -- --flag value
 ```
 
 ## 问题排查
 
-- **镜像不存在**:先 `docker build -t typephp .`;脚本失败时优先检查这一步。
+- **镜像不存在**:脚本会自动用 `<skill>/assets/` 构建;失败时手工 `docker build -t typephp:latest <skill>/assets` 并查看构建日志。
 - **提示找不到 `main`**:单文件编译要求全局 `main(): void` 函数;若仅想编译为库/扩展,改用 `-m`。
-- **链接错误 / 缺头文件**:确认使用的是本仓库镜像(内置 PHP 8.4 头文件与 `libphp.so`),不要在宿主导入非标准构建环境。
-- **宿主无法运行产物**:产物是 Linux 二进制,宿主若非 Linux 请通过 `docker run` 执行。
+- **链接错误 / 缺头文件**:确认用的是本 SKILL 的镜像(内置 PHP 8.4头文件与 `libphp.so`),不要在宿主导入非标准构建环境。
+- **宿主无法运行产物**:产物是 Linux 二进制,宿主若非 Linux 请通过 `docker run` 执行(推荐 `scripts/run-aot.sh`)。
 - **运行时扩展缺失**:`tpc` 编译期依赖的扩展需在镜像内可用(ZTS 版);涉及 Swoole 等扩展时告知用户按官方兼容性模型检查。
-- **Hyperf / 框架项目直接编译报 shebang / stray code / 缺 main**:去掉 shebang,把顶层执行代码搬进全局 `main(): void`,常量用 `defined() || define(...)` 守护;动态特性会走 fallback,不要追求全量 AOT。
+- **Hyperf / 框架项目直接编译报 shebang / stray code / 缺 main**:去掉 shebang,把顶层执行代码搬进全局 `main(): void`,常量用 `defined() || define(...)` 守护;动态特性会走 fallback,不要追求全量 AOT。Hyperf 项目直接用 `scripts/tpc-build.sh`。
 - **Swoole 扩展缺失或产物内不可用**:先做 M2 最小 Swoole server 验证;不行换 `php-builder` 私有运行时,或 `ext-deps` 声明运行时扩展。
-- **产物内框架启动报 `Filesystem::lastModified(... false ...)` TypeError**:运行未注入 `SCAN_CACHEABLE=true` / 缓存缺失,注解扫描实时遍历到 AOT 类。改用 `-e SCAN_CACHEABLE=true` 运行并确保先预热 `runtime/container`(见「注解扫描适配」,别改 vendor)。
-- **启动报 `Swoole short function names must be disabled`**:php.ini 加 `swoole.use_shortname=Off`(挂载到容器 conf.d)。
+- **产物内框架启动报 `Filesystem::lastModified(... false ...)` TypeError**:运行未注入 `SCAN_CACHEABLE=true` / 缓存缺失,注解扫描实时遍历到 AOT 类。改用 `-e SCAN_CACHEABLE=true` 运行并确保先预热 `runtime/container`(见「注解扫描适配」,别改 vendor;`scripts/run-aot.sh` 已内置该 env)。
+- **启动报 `Swoole short function names must be disabled`**:php.ini 加 `swoole.use_shortname=Off`。用 `scripts/run-aot.sh`(自动挂载 `assets/99-typephp.ini`)。
 - **报 `API must be called in the coroutine`**:Swoole 5+ 需 `\Swoole\Coroutine\run()` 包裹 `server->start()`。
-- **vendor 包内 publish/tests/docs 文件顶层 `return []` 报 `Stmt_Return`**:在 project.yml 的 `ignore` 排除(`vendor/*/publish`、`vendor/*/tests`、`vendor/*/docs`)。
-- **产物运行报 `Cannot redeclare class App\Controller\IndexController`**:带 `#[Inject]` 的类被写进了 AOT sources,预热生成了同名代理类,运行时同名替换冲突。解法:这类源码文件应从 sources 排除(由 tpc-build.sh「代理类反推」自动排除,见「业务代码静态编译边界」)。
-- **tpc 报 `getAbsolutePath(): Return value must be of type string, bool returned`**:tpc **以配置文件所在目录**为基准解析 `sources`/`ignore` 的相对路径。临时配置(如反推生成的 `aot-project.yml`)必须放在项目根,不能放 `runtime/` 子目录(否则按 `runtime/app/...` 找文件 realpath 失败)。
+- **vendor 包内 publish/tests/docs 文件顶层 `return []` 报 `Stmt_Return`**:在 project.yml 的 `ignore` 排除(`vendor/*/publish`、`vendor/*/tests`、`vendor/*/docs`;SKILL 模板已默认带上)。
+- **产物运行报 `Cannot redeclare class App\Controller\IndexController`**:带 `#[Inject]` 的类被写进了 AOT sources,预热生成了同名代理类,运行时同名替换冲突。解法:这类源码文件应从 sources 排除(由 `scripts/tpc-build.sh`「代理类反推」自动排除,见「业务代码静态编译边界」)。
+- **tpc 报 `getAbsolutePath(): Return value must be of type string, bool returned`**:tpc **以配置文件所在目录**为基准解析 `sources`/`ignore` 的相对路径。临时配置(如反推生成的 `aot-project.yml`)必须放在项目根,不能放 `runtime/` 子目录(否则按 `runtime/app/...` 找文件 realpath 失败)。`scripts/tpc-build.sh` 已强制输出到项目根。
 - **`project.yml` 的 `name:` 产物名错乱**:`name: hyperf-server  # 注释` 的行内注释会被脚本整体抓走(`awk -F': '`),产物名变成含注释的乱串。`name:` 行保持纯键值、注释移到独立行。
-- **产物名 `-` 被转 `_`**:`swoole-server.php` → `swoole_server`;需自定义名字用 `-o`。
+- **复制 SKILL 后脚本报找不到 Dockerfile / 资产**:确认是整体 `cp -R` 整个 `typephp-compile/`(含 `assets/`),脚本按自身所在目录的上级(SKILL 根)定位,不要只拷 `SKILL.md`。
+- **宿主没有 php**:打包相关 php 工具(反推/生成配置)在 docker 容器内执行,不依赖宿主 php;仅脚本自身用 bash 判断。
 
 ## 参考
 

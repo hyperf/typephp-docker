@@ -1,0 +1,21 @@
+# TypePHP AOT 编译配置(混合模式)—— 由 typephp-compile SKILL 模板自动生成,可自由修改。
+# 仅将「入口 + 纯叶子业务类」放进原生编译域,框架绑定业务走 ZendVM fallback。
+# 判定标准见 SKILL「AOT 边界判定表」:可 AOT = 不继承框架基类 + 无框架注解 + 无 #[Inject]。
+# 注意: name 的值会作为产物名(连字符被 tpc 转下划线 → hyperf_server),行内不要追加注释。
+name: hyperf-server
+sources:
+  - hyperf-aot/              # AOT 入口(含全局 main()),模板自动生成,必保留
+  # 按项目补充「纯叶子业务单元」的示例(取消注释并调整路径即启用):
+  # - app/Controller/                    # 目录级:带 #[Inject] 的类由 tpc-build.sh 反推代理类自动排除
+  # - app/Kernel/Http/Response.php       # 纯叶子,被 Controller 构造器依赖;可 AOT
+# 说明:带 #[Inject](属性注解注入)的类,预热阶段会生成同名代理类到 runtime/container/proxy/,
+# 运行时容器实例化的是代理类(同名替换) → 这些源码文件不可进 AOT。
+# tpc-build.sh 步骤 2 会根据 runtime/container/proxy/*.proxy.php 自动反推这些文件,
+# 注入到下列 ignore(生成项目根 aot-project.yml 供编译),无需手工维护:
+ignore:
+  - vendor/*/publish        # 这些目录常顶层 return [...] 触发 Stmt_Return 报错
+  - vendor/*/tests
+  - vendor/*/docs
+# 进阶(视需要取消注释,详见 SKILL「多文件项目能力」):
+# embedded-files: [vendor]  # 把 vendor 转字节码嵌入二进制,产物流转无需 Composer / 磁盘 vendor
+# optimize: full

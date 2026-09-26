@@ -91,7 +91,8 @@ docker run --rm -v "$PWD":/opt/www -w /opt/www typephp ./hello
    `main(int $argc, array $argv)`),返回值须为 void。
 4. **AOT 类是"无源码类"**:AOT 编译的类经反射表现为内置类(`ReflectionClass::getFileName()`
    返回 `false`)。若框架对扫描到的类直接取文件名做 `filemtime`/`lastModified` 会触发
-   `TypeError`,需要加适配补丁(见「框架适配补丁」)。
+   `TypeError`。**规避:不改源码/vendor,运行时注入 `SCAN_CACHEABLE=true` 走注解缓存、
+   不做实时扫描**(见「注解扫描适配」)。
 5. **Swoole 5+ 协程要求**:`Swoole\Coroutine\Http\Server()->start()` **只能在协程上下文调用**
    (报 `Swoole\Error: API must be called in the coroutine`)。用
    `\Swoole\Coroutine\run(function () { ... $http->start(); })` 包裹服务器生命周期。
@@ -117,20 +118,24 @@ TypePHP 的 `prepare()` 会按"类继承/依赖关系"对源文件做**拓扑排
 | 业务类形态 | 能否 AOT | 说明 |
 |---|---|---|
 | `extends` / `implements` 框架基类(Listener、ExceptionHandler、Processor、Model 等) | ❌ | 需父类/接口也进编译域,会拉入整个框架依赖树,不可持续。改为走 ZendVM fallback |
-| 依赖**注解收集**的类(如枚举 + `#[Message]`/`#[Constants]`) | ⚠️ 编译能过但语义错误 | AOT 类 `getFileName()=false` → 注解收集器跳过 → 注解元数据丢失、`getMessage()` 失效。**必须回 fallback** |
+| 依赖**注解收集**的类(如枚举 + `#[Message]`/`#[Constants]`) | ✅(配合 scan_cacheable) | 编译能过;注解元数据从预热的 `runtime/container` 缓存装载,不依赖实时扫描。前提:`SCAN_CACHEABLE=true` 运行(见「注解扫描适配」) |
 | 纯叶子类(不继承框架、无框架注解,如控制器基类属性注入) | ✅ | 可安全 AOT,走原生层加速 |
 
 > 经验:Hyperf/类似框架按「**入口 + 纯业务热点 AOT,框架绑定业务走 ZendVM fallback**」
 > 的**混合模式**推进,M3 已按此验证完整可用(产物运行 + 命中 controller)。
 
-#### 框架适配补丁(以 Hyperf 注解扫描为例)
+#### 注解扫描适配:SCAN_CACHEABLE 环境变量(不改源码 / 不 patch vendor)
 
-`vendor/hyperf/di/src/Annotation/Scanner.php` 的 `scan()` 对每个扫描到的类直接取
-`$reflectionClass->getFileName()` 并传给 `Filesystem::lastModified()`;AOT 类返回 `false`
-会 `TypeError: must be of type string, false given`。补丁:在循环内先取 `$filePath = $refl->getFileName();`
-然后 `if (! $filePath) { continue; }` 跳过无源码类。
-⚠️ 补丁落在 **vendor 内,`composer install` 会被覆盖**——建议 M5 阶段固化为 composer patch
-(composer.json `patches`)或在构建脚本中自动 `git apply`。
+Hyperf 注解收集发生在 TypePHP 编译**之前**的 php 解释器预热阶段,结果序列化到
+`runtime/container`(scan.cache / aspects.cache / classes.cache)。产物运行阶段的
+AOT 类对扫描器表现为"无源码类"(`getFileName()===false`)——**不要改 vendor 打补丁**。
+正确做法:项目源码保持 `'scan_cacheable' => env('SCAN_CACHEABLE', false)`,
+打包 / 运行时在 docker 内注入 `-e SCAN_CACHEABLE=true`:
+  - **预热**(php 解释器):`docker run -e SCAN_CACHEABLE=true ... sh -c 'rm -rf runtime/container && php bin/hyperf.php'`
+    → 缓存缺失时实时扫描并写入新缓存;
+  - **运行**(AOT 产物):直接 `loadCache`,跳过 class traversal,无 TypeError。
+打包链路已固化在 `typephp-docker/tpc-build.sh`(检测镜像 → 预热 → `tpc project.yml` → 输出运行命令),
+全程 docker 内进行、只靠环境变量,不触碰 config / app / vendor。
 
 ### 多文件项目能力(project.yml 常用项)
 
@@ -148,6 +153,8 @@ TypePHP 的 `prepare()` 会按"类继承/依赖关系"对源文件做**拓扑排
 
 ### 分阶段编译路线(每步有明确验证信号,避免一次投入撞硬墙)
 > 进度来源:`hyperf/biz-skeleton`(Hyperf 3.2)实测,2026-09-26。
+> 注解扫描适配方案纠正:由「patch vendor」改为「**不改源码/vendor,docker 内 env `SCAN_CACHEABLE=true`
+> + 预热缓存」**,打包链路固化于 `typephp-docker/tpc-build.sh`(M5 产物化已完成)。
 
 1. **M1 单文件环路 ✅**:写含 `main(): void` 的 hello 编译并在 docker 内运行 → 验证镜像/挂载/产物链条。
 2. **M2 最小 Swoole HTTP 服务器 ✅**(风险解除):
@@ -161,10 +168,11 @@ TypePHP 的 `prepare()` 会按"类继承/依赖关系"对源文件做**拓扑排
      常量 `defined() || define(...)` 守护。
    - `tpc hyperf-aot/main.php -o hyperf-server` → 产物启动后 `curl` 命中 controller(验证信号达成)。
    - `project.yml` 按「AOT 边界判定表」只放 `hyperf-aot` + 纯业务单元(如控制器),其余 app 走 fallback。
-   - **必须应用「框架适配补丁」**(Hyperf Scanner AOT 类 `getFileName()=false`)。
+   - 注解扫描按「注解扫描适配」处理:**不改源码/vendor**,docker 内 env `SCAN_CACHEABLE=true` + 预热缓存。
 4. **M4 完整 smoke test(待做)**:产物收束便携目录(见下),docker 内连 MySQL/Redis、命中 controller。
-5. **M5 产物化(待做)**:把 M1–M4 命令固化为构建脚本 / Makefile,支持 `TYPEPHP_IMAGE` /
-   `TYPEPHP_USE_LOCAL`;同时把 vendor 适配补丁固化为 composer patch。
+5. **M5 产物化 ✅**:`typephp-docker/tpc-build.sh` 固化「预热缓存(env `SCAN_CACHEABLE=true`)
+   → `tpc project.yml` → 运行命令」,支持 `TYPEPHP_IMAGE` / `TYPEPHP_NO_BUILD` / `AOT_OUTPUT`;
+   不改源码、不 patch vendor。
 
 ### 产物形态与部署
 
@@ -213,7 +221,7 @@ TypePHP 的 `prepare()` 会按"类继承/依赖关系"对源文件做**拓扑排
 - **运行时扩展缺失**:`tpc` 编译期依赖的扩展需在镜像内可用(ZTS 版);涉及 Swoole 等扩展时告知用户按官方兼容性模型检查。
 - **Hyperf / 框架项目直接编译报 shebang / stray code / 缺 main**:去掉 shebang,把顶层执行代码搬进全局 `main(): void`,常量用 `defined() || define(...)` 守护;动态特性会走 fallback,不要追求全量 AOT。
 - **Swoole 扩展缺失或产物内不可用**:先做 M2 最小 Swoole server 验证;不行换 `php-builder` 私有运行时,或 `ext-deps` 声明运行时扩展。
-- **产物内框架启动报 `Filesystem::lastModified(... false ...)` TypeError**:注解扫描遇到 AOT 类(`getFileName()=false`),按「框架适配补丁」改 vendor Scanner 跳过无源码类。
+- **产物内框架启动报 `Filesystem::lastModified(... false ...)` TypeError**:运行未注入 `SCAN_CACHEABLE=true` / 缓存缺失,注解扫描实时遍历到 AOT 类。改用 `-e SCAN_CACHEABLE=true` 运行并确保先预热 `runtime/container`(见「注解扫描适配」,别改 vendor)。
 - **启动报 `Swoole short function names must be disabled`**:php.ini 加 `swoole.use_shortname=Off`(挂载到容器 conf.d)。
 - **报 `API must be called in the coroutine`**:Swoole 5+ 需 `\Swoole\Coroutine\run()` 包裹 `server->start()`。
 - **vendor 包内 publish/tests/docs 文件顶层 `return []` 报 `Stmt_Return`**:在 project.yml 的 `ignore` 排除(`vendor/*/publish`、`vendor/*/tests`、`vendor/*/docs`)。

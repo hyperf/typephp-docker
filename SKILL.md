@@ -11,9 +11,9 @@ metadata:
 本 Skill 用于把 PHP 源码通过 **TypePHP(`tpc`)** AOT 编译器编译为**原生可执行文件**,运行在
 本 Skill 内置的 Docker 环境内。
 
-> **自包含**:本 Skill 是一个**自包含目录单元** —— 编译环境(`assets/`)、辅助脚本(`scripts/`)、
-> 项目脚手架模板(`templates/`)全部内嵌其中。把整个 `typephp-compile/` 复制到任意项目的
-> `.claude/skills/`(或项目内任意目录)即可使用,**不依赖仓库根或任何项目内文件**。
+> **自包含**:本 Skill 是一个**自包含仓库单元** —— 编译环境(`assets/`)、辅助脚本(`scripts/`)、
+> 项目脚手架模板(`templates/`)全部内嵌在仓库根,**本仓库根目录即 SKILL 根**。开发者直接
+> `git clone` 本仓库到项目的 `.claude/skills/typephp-compile` 即可使用,不依赖项目内任何文件。
 
 > **触发与默认行为**:当用户要求"编译 / 构建 / 运行一个 PHP 程序"时,默认使用 `tpc`
 > 将其编译为原生二进制,除非用户显式指定使用 `php` 解释器(例如 `php -S` 起开发服务器)。
@@ -21,33 +21,37 @@ metadata:
 > **经验维护约定**:TypePHP 编译经验(硬限制、踩坑、已验证方案)**统一持续维护到本文件**——
 > 通用规则沉淀进正文各小节;按里程碑推进的具体项目实例记录见「分阶段编译路线」。
 
-## 目录结构与复制安装
+## 结构、安装与 <skill>/ 约定
+
+**本仓库根目录即 SKILL 根**(下文以 `<skill>/` 代指):
 
 ```
-typephp-compile/                  # ← SKILL 根(下文以 <skill>/ 代指)
-├── SKILL.md                      # 本文档
+<skill>/                           # ← 本仓库根,克隆到项目 .claude/skills/typephp-compile 后即该目录
+├── SKILL.md                       # 本文档
 ├── scripts/
-│   ├── tpc-compile.sh            # 单文件 / 简单项目编译
-│   ├── tpc-build.sh              # Hyperf 等框架项目「四步打包」(推荐入口)
-│   └── run-aot.sh                # 运行 AOT 产物(Linux ELF,经 docker)
+│   ├── tpc-compile.sh             # 单文件 / 简单项目编译
+│   ├── tpc-build.sh               # Hyperf 等框架项目「四步打包」(推荐入口)
+│   └── run-aot.sh                 # 运行 AOT 产物(Linux ELF,经 docker)
 ├── assets/
-│   ├── Dockerfile                # tpc 编译环境镜像(php 8.4 zts + swoole + tpc)
-│   ├── 99-typephp.ini            # swoole.use_shortname=Off(运行 AOT 产物时挂载)
-│   ├── proxy-exclude.php         # 代理类反推(排除 #[Inject] 同名代理类对应源码)
-│   └── build-aot-config.php      # 生成临时编译配置 aot-project.yml
+│   ├── Dockerfile                 # tpc 编译环境镜像(php 8.4 zts + swoole + tpc)
+│   ├── 99-typephp.ini             # swoole.use_shortname=Off(运行 AOT 产物时挂载)
+│   ├── proxy-exclude.php          # 代理类反推(排除 #[Inject] 同名代理类对应源码)
+│   └── build-aot-config.php       # 生成临时编译配置 aot-project.yml
 ├── templates/
-│   ├── project.yml               # 通用编译配置骨架
-│   └── hyperf-aot/main.php       # Hyperf AOT 入口模板(泛化,无项目硬编码)
-└── fixtures/hello.php            # 单文件冒烟验证样例
+│   ├── project.yml                # 通用编译配置骨架
+│   └── hyperf-aot/main.php        # Hyperf AOT 入口模板(泛化,无项目硬编码)
+└── fixtures/
+    ├── hello.php                  # 单文件冒烟验证样例
+    └── swoole-server.php          # 最小 Swoole HTTP 服务器(M2 演示样例)
 ```
 
-**复制到新项目**(自包含验证):
+**安装到新项目**(推荐 git clone,本仓库即自包含验证):
 
 ```bash
-cp -R <SKILL 源码目录>/typephp-compile <项目>/.claude/skills/typephp-compile
+git clone https://github.com/hyperf/typephp-docker.git <项目>/.claude/skills/typephp-compile
 ```
 
-装到 `.claude/skills/` 时,下文所有 `<skill>/` 即
+装到 `.claude/skills/` 后,下文所有 `<skill>/` 即
 `<项目>/.claude/skills/typephp-compile/`。
 
 ## 环境
@@ -296,9 +300,9 @@ conf.d、注入 `SCAN_CACHEABLE=true`、映射端口(见该脚本头注释的 `A
      `sources` 用**目录级**(`app/Controller/`),无需手工维护类清单;
    - 验证:`prepare completed: N source files` 不含代理类;产物 curl 命中接口且返回**注入
      服务的值**证明 DI 链路完整(php-demo 实测 `{"code":0,...,"message":"Hello foo"}`)。
-7. **M7 自包含化 ✅**(本版):SKILL 收敛为自包含目录单元——编译环境、辅助脚本、项目模板全部
-   内嵌 `<skill>/`,整体 `cp -R` 到任意项目即用,不再依赖项目内 `typephp-docker/` 等散落文件;
-   反推等 php 工具改容器内执行,不依赖宿主 php。
+7. **M7 自包含化 ✅**(本版):SKILL 收敛为自包含仓库单元——**仓库根即 SKILL 根**,编译环境、
+   辅助脚本、项目模板全部内嵌 `<skill>/`,`git clone` 到项目 `.claude/skills/typephp-compile`
+   即用,不再依赖项目内 `typephp-docker/` 等散落文件;反推等 php 工具改容器内执行,不依赖宿主 php。
 
 ### 产物形态与部署
 
@@ -354,7 +358,7 @@ conf.d、注入 `SCAN_CACHEABLE=true`、映射端口(见该脚本头注释的 `A
 - **产物运行报 `Cannot redeclare class App\Controller\IndexController`**:带 `#[Inject]` 的类被写进了 AOT sources,预热生成了同名代理类,运行时同名替换冲突。解法:这类源码文件应从 sources 排除(由 `scripts/tpc-build.sh`「代理类反推」自动排除,见「业务代码静态编译边界」)。
 - **tpc 报 `getAbsolutePath(): Return value must be of type string, bool returned`**:tpc **以配置文件所在目录**为基准解析 `sources`/`ignore` 的相对路径。临时配置(如反推生成的 `aot-project.yml`)必须放在项目根,不能放 `runtime/` 子目录(否则按 `runtime/app/...` 找文件 realpath 失败)。`scripts/tpc-build.sh` 已强制输出到项目根。
 - **`project.yml` 的 `name:` 产物名错乱**:`name: hyperf-server  # 注释` 的行内注释会被脚本整体抓走(`awk -F': '`),产物名变成含注释的乱串。`name:` 行保持纯键值、注释移到独立行。
-- **复制 SKILL 后脚本报找不到 Dockerfile / 资产**:确认是整体 `cp -R` 整个 `typephp-compile/`(含 `assets/`),脚本按自身所在目录的上级(SKILL 根)定位,不要只拷 `SKILL.md`。
+- **装好 SKILL 后脚本报找不到 Dockerfile / 资产**:用 `git clone https://github.com/hyperf/typephp-docker.git <项目>/.claude/skills/typephp-compile` 整体安装本仓库(仓库根即 SKILL 根,含 `assets/`),脚本按自身所在目录的上级(SKILL 根)定位,不要只拷 `SKILL.md`。
 - **宿主没有 php**:打包相关 php 工具(反推/生成配置)在 docker 容器内执行,不依赖宿主 php;仅脚本自身用 bash 判断。
 
 ## 参考

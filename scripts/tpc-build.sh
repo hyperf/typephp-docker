@@ -4,7 +4,8 @@
 #
 # 本脚本属于 typephp-compile SKILL(自包含):编译环境(assets/Dockerfile)、配套工具
 # (assets/proxy-exclude.php / build-aot-config.php)、项目脚手架模板(templates/) 全部内嵌在
-# SKILL 内——把 typephp-compile/ 目录整体复制到任意项目即可使用。项目根取「调用时所在目录」
+# SKILL 内——仓库根即 SKILL 根,git clone 到项目 .claude/skills/typephp-compile 即可使用。
+# 项目根取「调用时所在目录」
 # ($PWD),或以环境变量 TPC_PROJECT_ROOT 显式指定。
 #
 # 关键设计(遵循"通过脚本临时处理,而非修改源码"):

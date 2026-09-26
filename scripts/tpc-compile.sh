@@ -3,8 +3,8 @@
 # tpc-compile.sh — 使用 TypePHP(tpc) 将 PHP 源码编译为原生可执行文件。
 #
 # 本脚本属于 typephp-compile SKILL(自包含):编译环境(Dockerfile 等)位于 SKILL 的
-# assets/ 目录 —— 把整个 typephp-compile/ 目录复制到任意项目 .claude/skills/ 下即开箱可用,
-# 不依赖仓库根或项目内任何文件。
+# assets/ 目录 —— 仓库根即 SKILL 根,git clone 到项目 .claude/skills/typephp-compile 即开箱可用,
+# 不依赖项目内任何文件。
 #
 # 默认在 Docker 容器内执行编译:
 #   docker run --rm -v "$PWD":/opt/www -w /opt/www <image> tpc <args...>

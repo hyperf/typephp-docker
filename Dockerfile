@@ -14,6 +14,7 @@ ENV PATH="/root/typephp:$PATH"
 ENV LD_LIBRARY_PATH="$PHP_HOME/lib:$PHPX_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ENV TYPEPHP_VERSION="v0.9.3"
 ENV PHP_VERSION="8.4.26"
+ENV SWOOLE_VERSION="v6.2.2"
 
 # 基础镜像已内置 gcc/g++/make/pkg-config 和 PHP 8.4 头文件(php8.4-dev)
 # php8.4-embed 安装后 libphp.so 即位于 $PHP_HOME/lib(= /usr/lib),无需再手动拷贝
@@ -25,6 +26,7 @@ RUN set -eux \
         curl \
         libgmp-dev \
         libmpfr-dev \
+        libpcre2-dev \
     && git clone https://github.com/swoole/phpx.git /opt/phpx \
     && cmake -S /opt/phpx -B /opt/phpx/build \
         -DCMAKE_BUILD_TYPE=Release \
@@ -43,7 +45,19 @@ RUN set -eux \
     && mkdir /root/typephp \
     && tar -xzf tpc.tar.gz -C /root/typephp \
     && mv /root/typephp/*/* /root/typephp \
-    && rm -f tpc.tar.gz
+    && rm -f tpc.tar.gz \
+    && git clone --depth 1 --branch "${SWOOLE_VERSION}" https://github.com/swoole/swoole-src.git /tmp/swoole-src \
+    && cd /tmp/swoole-src \
+    && phpize \
+    && ./configure \
+        --enable-http2 \
+        --enable-swoole-curl \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd / \
+    && rm -rf /tmp/swoole-src \
+    && printf "extension=swoole.so\n" > /usr/local/etc/php/conf.d/swoole.ini \
+    && php -m | grep -i swoole
 
 WORKDIR /opt/www
 

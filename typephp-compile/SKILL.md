@@ -119,10 +119,42 @@ TypePHP 的 `prepare()` 会按"类继承/依赖关系"对源文件做**拓扑排
 |---|---|---|
 | `extends` / `implements` 框架基类(Listener、ExceptionHandler、Processor、Model 等) | ❌ | 需父类/接口也进编译域,会拉入整个框架依赖树,不可持续。改为走 ZendVM fallback |
 | 依赖**注解收集**的类(如枚举 + `#[Message]`/`#[Constants]`) | ✅(配合 scan_cacheable) | 编译能过;注解元数据从预热的 `runtime/container` 缓存装载,不依赖实时扫描。前提:`SCAN_CACHEABLE=true` 运行(见「注解扫描适配」) |
-| 纯叶子类(不继承框架、无框架注解,如控制器基类属性注入) | ✅ | 可安全 AOT,走原生层加速 |
+| 带 `#[Inject]`(属性注解注入)的类,如 Controller 注入 Service | ❌ | 预热阶段会生成**同名代理类**(`runtime/container/proxy/<FQCN 下划线化>.proxy.php`,如 `App_Controller_IndexController.proxy.php`),运行时容器实例化的是代理类(同名替换)。源码文件若进 AOT,会与运行时代理类重声明冲突 Fatal `Cannot redeclare class`。由 tpc-build.sh「代理类反推」自动排除(见下节),无需手工维护 |
+| 纯叶子类(不继承框架、无框架注解、无 `#[Inject]`,如控制器基类构造器注入) | ✅ | 可安全 AOT,走原生层加速。注意判定标准是「不含 `#[Inject]`」——带 `#[Inject]` 的一律归上一行 |
 
 > 经验:Hyperf/类似框架按「**入口 + 纯业务热点 AOT,框架绑定业务走 ZendVM fallback**」
 > 的**混合模式**推进,M3 已按此验证完整可用(产物运行 + 命中 controller)。
+
+#### 代理类反推:自动排除被同名代理类替换的源码(不改 sources 清单)
+
+**前置逻辑**:编译前**必须先用 php 解释器预热**(`php bin/hyperf.php`,注入 `SCAN_CACHEABLE=true`)。
+预热会实时扫描注解写入 `runtime/container/*.cache`,同时为带 `#[Inject]` 等需代理的类生成
+**同名代理类**(内容:`namespace App\Controller; class IndexController extends Controller { ... }`,
+与原始类同名同 FQCN)到 `runtime/container/proxy/`。运行时 Hyperf 容器实例化的是该代理类——
+代理类同名加载,原始源码文件不会再被加载。**因此这些源码文件绝不能进 AOT sources**:
+tpc 若把原类注册为内置类,运行时代理类重声明同名类直接 `Fatal: Cannot redeclare class`。
+
+**反推算法**(避免手工维护 `app/Controller/` 清单):
+1. 逐个解析 `runtime/container/proxy/*.proxy.php` **文件内容**中的 `namespace` + `class`
+   (**别用文件名下划线反推 FQCN**,类名/命名空间含下划线时会歧义);
+2. 得精确 FQCN 后,按 `composer.json` 的 `autoload.psr-4` 前缀映射为项目相对路径
+   (取**最长匹配前缀**,`str_replace('\\','/')` + `.php`),如 `App\Controller\IndexController`
+   → `app/Controller/IndexController.php`;
+3. 把这份文件列表注入 tpc 配置的 `ignore` 块,重新生成临时配置供 `tpc` 使用。
+
+**载体**(`typephp-docker/` 三个文件,项目内自包含,源仓库 hyperf/repos/typephp-docker 同名):
+- `proxy-exclude.php` —— 反推实现,stdout 每行输出一个相对路径;
+- `build-aot-config.php` —— 读 `project.yml`,把反推结果注入 `ignore`(原配置无 `ignore:` 则追加),
+  输出 `aot-project.yml`(写在项目根,原因见「问题排查」`getAbsolutePath`);
+- `tpc-build.sh` —— 固化四步:①预热缓存(清空 `runtime/container` + php 解释器 +
+  `SCAN_CACHEABLE=true`,产出缓存与代理类)→ ②反推排除 → ③`tpc aot-project.yml <args>` →
+  ④确认产物。**注意**③之后每次编译都基于**重新预热后的新代理状态**,新增一个带 `#[Inject]`
+  的类无需手工改任何清单。
+
+**验证信号**:tpc 日志 `prepare completed: N source files` 的 N **不含**代理类对应文件
+(如 `sources: app/Controller/` 下有 `Controller.php`+`IndexController.php` 两个文件、IndexController
+带 Inject 时,N 只计入 Controller.php 等非代理文件);产物运行后 curl 命中接口且返回
+**注入服务提供的值**(而非默认值),证明 DI 注入链路完整。
 
 #### 注解扫描适配:SCAN_CACHEABLE 环境变量(不改源码 / 不 patch vendor)
 
@@ -134,8 +166,10 @@ AOT 类对扫描器表现为"无源码类"(`getFileName()===false`)——**不�
   - **预热**(php 解释器):`docker run -e SCAN_CACHEABLE=true ... sh -c 'rm -rf runtime/container && php bin/hyperf.php'`
     → 缓存缺失时实时扫描并写入新缓存;
   - **运行**(AOT 产物):直接 `loadCache`,跳过 class traversal,无 TypeError。
-打包链路已固化在 `typephp-docker/tpc-build.sh`(检测镜像 → 预热 → `tpc project.yml` → 输出运行命令),
-全程 docker 内进行、只靠环境变量,不触碰 config / app / vendor。
+打包链路已固化在 `typephp-docker/tpc-build.sh`(检测镜像 → 预热缓存+生成代理类 → **代理类反推
+自动排除**(见上一节)→ `tpc aot-project.yml` → 输出运行命令),
+全程 docker 内进行、只靠环境变量,不触碰 config / app / vendor;`sources` 用目录级
+(如 `app/Controller/`),带 `#[Inject]` 的类由反推步骤自动排除。
 
 ### 多文件项目能力(project.yml 常用项)
 
@@ -173,6 +207,15 @@ AOT 类对扫描器表现为"无源码类"(`getFileName()===false`)——**不�
 5. **M5 产物化 ✅**:`typephp-docker/tpc-build.sh` 固化「预热缓存(env `SCAN_CACHEABLE=true`)
    → `tpc project.yml` → 运行命令」,支持 `TYPEPHP_IMAGE` / `TYPEPHP_NO_BUILD` / `AOT_OUTPUT`;
    不改源码、不 patch vendor。
+6. **M6 代理类反推自动化 ✅**(承接 M5,补齐 `#[Inject]` 场景):
+   - 前置:预热会为带 `#[Inject]` 的类生成**同名代理类**到 `runtime/container/proxy/`,
+     这些源码文件运行时被代理类替换,进 AOT 会 `Cannot redeclare class`(见「业务代码静态
+     编译边界」判定表);
+   - 实现:`typephp-docker/{proxy-exclude,build-aot-config}.php` +
+     `tpc-build.sh` 新增「2/4 代理类反推」步骤,自动把反推结果注入 `ignore` 生成 `aot-project.yml`,
+     `sources` 用**目录级**(`app/Controller/`),无需手工维护类清单;
+   - 验证:`prepare completed: N source files` 不含代理类;产物 curl 命中接口且返回**注入
+     服务的值**证明 DI 链路完整(php-demo 实测 `{"code":0,...,"message":"Hello foo"}`)。
 
 ### 产物形态与部署
 
@@ -184,7 +227,7 @@ AOT 类对扫描器表现为"无源码类"(`getFileName()===false`)——**不�
 | 风险 | 等级 | 缓解 / 回退 |
 |---|---|---|
 | Swoole 扩展在产物内不可用(ZTS ABI / 事件循环 / Embed SAPI 主循环冲突) | **高** | M2 前置验证;失败走 `php-builder` 私有运行时;再失败用 `-m ext` 把热点业务编译为扩展挂到原生 Hyperf |
-| 注解/容器/代理动态面导致大量编译错(ProxyManager 动态生成类、AnnotationCollector 反射) | **高** | `SCAN_CACHEABLE=true` 预生成代理类;动态代码靠 ZendVM fallback;把 `app/` 抽特定类加入 sources 逐个验证 |
+| 注解/容器/代理动态面导致大量编译错(ProxyManager 动态生成类、AnnotationCollector 反射、`#[Inject]` 同名代理) | **高** | `SCAN_CACHEABLE=true` 预生成代理类;动态代码靠 ZendVM fallback;**带 `#[Inject]` 的类由「代理类反推」自动排除出 AOT**(M6,见上),不会进 sources |
 | 扩展在 aarch64 + PHP 8.4 ZTS 需重新编译 | 中 | 容器内 phpize + make(镜像已有 gcc) |
 | 产物体积 / 部署复杂度 | 低 | 便携目录方案已业界验证 |
 
@@ -225,6 +268,9 @@ AOT 类对扫描器表现为"无源码类"(`getFileName()===false`)——**不�
 - **启动报 `Swoole short function names must be disabled`**:php.ini 加 `swoole.use_shortname=Off`(挂载到容器 conf.d)。
 - **报 `API must be called in the coroutine`**:Swoole 5+ 需 `\Swoole\Coroutine\run()` 包裹 `server->start()`。
 - **vendor 包内 publish/tests/docs 文件顶层 `return []` 报 `Stmt_Return`**:在 project.yml 的 `ignore` 排除(`vendor/*/publish`、`vendor/*/tests`、`vendor/*/docs`)。
+- **产物运行报 `Cannot redeclare class App\Controller\IndexController`**:带 `#[Inject]` 的类被写进了 AOT sources,预热生成了同名代理类,运行时同名替换冲突。解法:这类源码文件应从 sources 排除(由 tpc-build.sh「代理类反推」自动排除,见「业务代码静态编译边界」)。
+- **tpc 报 `getAbsolutePath(): Return value must be of type string, bool returned`**:tpc **以配置文件所在目录**为基准解析 `sources`/`ignore` 的相对路径。临时配置(如反推生成的 `aot-project.yml`)必须放在项目根,不能放 `runtime/` 子目录(否则按 `runtime/app/...` 找文件 realpath 失败)。
+- **`project.yml` 的 `name:` 产物名错乱**:`name: hyperf-server  # 注释` 的行内注释会被脚本整体抓走(`awk -F': '`),产物名变成含注释的乱串。`name:` 行保持纯键值、注释移到独立行。
 - **产物名 `-` 被转 `_`**:`swoole-server.php` → `swoole_server`;需自定义名字用 `-o`。
 
 ## 参考
